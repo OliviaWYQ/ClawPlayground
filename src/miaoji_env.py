@@ -68,6 +68,12 @@ class MiaoJiBallEnv:
         self.max_steps = max_steps
         self.world_size = world_size
 
+        # 尺寸参数（放大后更易观察）
+        self.ball_scale = 0.75
+        self.obstacle_scale = 1.35
+        self.wall_height = 0.45
+        self.wall_thickness = 0.12
+
         self.rng = np.random.default_rng(seed)
 
         self.client_id = p.connect(p.GUI if gui else p.DIRECT)
@@ -84,8 +90,8 @@ class MiaoJiBallEnv:
 
         self.ball_id = p.loadURDF(
             "sphere_small.urdf",
-            basePosition=[0.0, 0.0, 0.25],
-            globalScaling=0.35,
+            basePosition=[0.0, 0.0, 0.35],
+            globalScaling=self.ball_scale,
         )
 
         # Body层约束
@@ -105,11 +111,13 @@ class MiaoJiBallEnv:
     def _build_walls(self) -> None:
         """创建边界墙"""
         w = self.world_size
+        h = self.wall_height
+        t = self.wall_thickness
         wall_cfg = [
-            ([0, +w, 0.3], [w, 0.05, 0.3]),
-            ([0, -w, 0.3], [w, 0.05, 0.3]),
-            ([+w, 0, 0.3], [0.05, w, 0.3]),
-            ([-w, 0, 0.3], [0.05, w, 0.3]),
+            ([0, +w, h], [w, t, h]),
+            ([0, -w, h], [w, t, h]),
+            ([+w, 0, h], [t, w, h]),
+            ([-w, 0, h], [t, w, h]),
         ]
 
         for pos, half_ext in wall_cfg:
@@ -133,8 +141,8 @@ class MiaoJiBallEnv:
         for x, y in obstacle_xy:
             oid = p.loadURDF(
                 "cube_small.urdf",
-                basePosition=[x, y, 0.2],
-                globalScaling=0.75,
+                basePosition=[x, y, 0.30],
+                globalScaling=self.obstacle_scale,
             )
             self.obstacle_ids.append(oid)
 
@@ -144,7 +152,7 @@ class MiaoJiBallEnv:
         self.visited_cells.clear()
 
         # 重置球状态
-        p.resetBasePositionAndOrientation(self.ball_id, [0.0, 0.0, 0.25], [0, 0, 0, 1])
+        p.resetBasePositionAndOrientation(self.ball_id, [0.0, 0.0, 0.35], [0, 0, 0, 1])
         p.resetBaseVelocity(self.ball_id, [0, 0, 0], [0, 0, 0])
 
         # 重置情绪与意志
