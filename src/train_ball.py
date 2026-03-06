@@ -27,7 +27,7 @@ class MiaoJiGymEnv(gym.Env):
         self.core = MiaoJiBallEnv(gui=gui, real_time=gui, max_steps=max_steps)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(10,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(18,), dtype=np.float32
         )
 
     def reset(self, *, seed=None, options=None):
