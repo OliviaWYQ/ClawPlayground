@@ -7,6 +7,7 @@
 3) 障碍物数量与位置每回合随机
 4) 增加“局部感知”观测：只看附近障碍，感知范围会随运动状态变化
 5) 增大活动空间，并在较大范围内随机出生
+6) 增加随机金币奖励：吃金币得分，撞障碍/墙体结束
 """
 
 from __future__ import annotations
@@ -62,6 +63,16 @@ class MiaoJiBallEnv:
         self.max_obstacles = 7
         self.obstacle_clearance = 0.7  # 障碍之间最小间距
 
+        # 随机金币参数
+        self.coin_ids: List[int] = []
+        self.coin_positions: Dict[int, np.ndarray] = {}
+        self.min_coins = 2
+        self.max_coins = 5
+        self.coin_radius = 0.08
+        self.coin_clearance = 0.55
+        self.coin_reward = 1.8
+        self.coin_collect_dist = 0.24
+
         # 局部感知参数（范围会动态变化）
         self.base_sensor_range = 1.0
         self.max_sensor_range = 2.4
@@ -104,6 +115,7 @@ class MiaoJiBallEnv:
         self.step_count = 0
 
         self._spawn_random_obstacles()
+        self._spawn_random_coins()
 
     # ---------- 构建场景 ----------
     def _build_walls(self) -> None:
@@ -171,6 +183,59 @@ class MiaoJiBallEnv:
                 placed.append(pt)
                 break
 
+    def _clear_coins(self) -> None:
+        for cid in self.coin_ids:
+            p.removeBody(cid)
+        self.coin_ids = []
+        self.coin_positions = {}
+
+    def _spawn_random_coins(self, avoid: np.ndarray | None = None) -> None:
+        self._clear_coins()
+        count = int(self.rng.integers(self.min_coins, self.max_coins + 1))
+        bound = self.world_size - 0.5
+
+        obstacle_positions: List[np.ndarray] = []
+        for oid in self.obstacle_ids:
+            op, _ = p.getBasePositionAndOrientation(oid)
+            obstacle_positions.append(np.array(op[:2], dtype=np.float32))
+
+        placed: List[np.ndarray] = []
+        for _ in range(count):
+            for _try in range(150):
+                x = float(self.rng.uniform(-bound, bound))
+                y = float(self.rng.uniform(-bound, bound))
+                pt = np.array([x, y], dtype=np.float32)
+
+                if avoid is not None and np.linalg.norm(pt - avoid) < 0.85:
+                    continue
+
+                too_close_obstacle = any(
+                    np.linalg.norm(pt - op) < self.coin_clearance for op in obstacle_positions
+                )
+                if too_close_obstacle:
+                    continue
+
+                too_close_coin = any(np.linalg.norm(pt - cp) < self.coin_clearance for cp in placed)
+                if too_close_coin:
+                    continue
+
+                col = p.createCollisionShape(p.GEOM_SPHERE, radius=self.coin_radius)
+                vis = p.createVisualShape(
+                    p.GEOM_SPHERE,
+                    radius=self.coin_radius,
+                    rgbaColor=[1.0, 0.85, 0.1, 1.0],
+                )
+                cid = p.createMultiBody(
+                    baseMass=0,
+                    baseCollisionShapeIndex=col,
+                    baseVisualShapeIndex=vis,
+                    basePosition=[x, y, self.coin_radius + 0.03],
+                )
+                self.coin_ids.append(cid)
+                self.coin_positions[cid] = pt
+                placed.append(pt)
+                break
+
     # ---------- 环境接口 ----------
     def reset(self) -> np.ndarray:
         self.step_count = 0
@@ -185,8 +250,12 @@ class MiaoJiBallEnv:
         spawn_bound = self.world_size - 1.0
         sx = float(self.rng.uniform(-spawn_bound, spawn_bound))
         sy = float(self.rng.uniform(-spawn_bound, spawn_bound))
+        spawn_xy = np.array([sx, sy], dtype=np.float32)
         p.resetBasePositionAndOrientation(self.ball_id, [sx, sy, 0.35], [0, 0, 0, 1])
         p.resetBaseVelocity(self.ball_id, [0, 0, 0], [0, 0, 0])
+
+        # 金币也随机刷新，并尽量避开出生点
+        self._spawn_random_coins(avoid=spawn_xy)
 
         self.emotion = EmotionState()
         self.will = WillState()
@@ -272,6 +341,27 @@ class MiaoJiBallEnv:
         count = len(nearby)
         return rels, count
 
+    def _nearest_coin_feature(self, pos_xy: np.ndarray) -> Tuple[float, float, float]:
+        if not self.coin_positions:
+            return 0.0, 0.0, 1.0
+
+        nearest_rel = None
+        nearest_dist = 1e9
+        for cpos in self.coin_positions.values():
+            rel = cpos - pos_xy
+            d = float(np.linalg.norm(rel))
+            if d < nearest_dist:
+                nearest_dist = d
+                nearest_rel = rel
+
+        assert nearest_rel is not None
+        rel_norm = nearest_rel / max(self.sensor_range, 1e-6)
+        return (
+            float(np.clip(rel_norm[0], -1.0, 1.0)),
+            float(np.clip(rel_norm[1], -1.0, 1.0)),
+            float(np.clip(nearest_dist / (self.world_size * 2.0), 0.0, 1.0)),
+        )
+
     def _get_obs(self) -> np.ndarray:
         pos, _ = p.getBasePositionAndOrientation(self.ball_id)
         lv, _ = p.getBaseVelocity(self.ball_id)
@@ -281,6 +371,7 @@ class MiaoJiBallEnv:
         pos_xy = np.array([x, y], dtype=np.float32)
         min_dist = self._min_distance_to_obstacles(pos_xy)
         nearby_rels, nearby_count = self._get_nearby_obstacles(pos_xy)
+        coin_rel_x, coin_rel_y, coin_dist_norm = self._nearest_coin_feature(pos_xy)
 
         local_feats = []
         for i in range(self.max_nearby_obs):
@@ -304,11 +395,29 @@ class MiaoJiBallEnv:
                 self.will.beta,
                 self.sensor_range / self.max_sensor_range,
                 min(1.0, nearby_count / 6.0),
+                coin_rel_x,
+                coin_rel_y,
+                coin_dist_norm,
+                min(1.0, len(self.coin_ids) / max(1, self.max_coins)),
                 *local_feats,  # 3个障碍 * (rel_x, rel_y)
             ],
             dtype=np.float32,
         )
         return obs
+
+    def _collect_coins(self, pos_xy: np.ndarray) -> int:
+        collected: List[int] = []
+        for cid, cpos in list(self.coin_positions.items()):
+            if np.linalg.norm(pos_xy - cpos) <= self.coin_collect_dist:
+                collected.append(cid)
+
+        for cid in collected:
+            p.removeBody(cid)
+            self.coin_positions.pop(cid, None)
+            if cid in self.coin_ids:
+                self.coin_ids.remove(cid)
+
+        return len(collected)
 
     def _compute_reward_done(self, pos_xy: np.ndarray) -> Tuple[float, bool, Dict]:
         hit = False
@@ -336,7 +445,14 @@ class MiaoJiBallEnv:
         reward += float(np.clip(improvement, -0.2, 0.2) * 0.5)
         self.last_min_dist = min_dist
 
-        done = False
+        coins_collected = self._collect_coins(pos_xy)
+        reward += coins_collected * self.coin_reward
+        if len(self.coin_ids) == 0:
+            reward += 1.0
+            done = True
+        else:
+            done = False
+
         if hit:
             reward -= 10.0
             done = True
@@ -350,6 +466,8 @@ class MiaoJiBallEnv:
             "new_cell": is_new,
             "obstacles": len(self.obstacle_ids),
             "sensor_range": self.sensor_range,
+            "coins_left": len(self.coin_ids),
+            "coins_collected": coins_collected,
         }
         return float(reward), done, info
 
@@ -428,7 +546,7 @@ if __name__ == "__main__":
             if i % 120 == 0:
                 print(
                     f"step={i:4d} reward={reward:+.3f} dist={info['min_dist']:.3f} "
-                    f"obsN={info['obstacles']} sense={info['sensor_range']:.2f} "
+                    f"obsN={info['obstacles']} coins={info['coins_left']} sense={info['sensor_range']:.2f} "
                     f"pain={env.emotion.pain:.2f} anx={env.emotion.anxiety:.2f} beta={env.will.beta:.2f}"
                 )
 
