@@ -111,6 +111,7 @@ class MiaoJiBallEnv:
 
         # 观察相关
         self.last_min_dist = 999.0
+        self.last_coin_dist = 999.0
         self.visited_cells: set[Tuple[int, int]] = set()
         self.step_count = 0
 
@@ -261,8 +262,10 @@ class MiaoJiBallEnv:
         self.will = WillState()
 
         pos, _ = p.getBasePositionAndOrientation(self.ball_id)
-        self.last_min_dist = self._min_distance_to_obstacles(np.array(pos[:2]))
-        self._mark_visited(np.array(pos[:2]))
+        pos_xy = np.array(pos[:2], dtype=np.float32)
+        self.last_min_dist = self._min_distance_to_obstacles(pos_xy)
+        self.last_coin_dist = self._nearest_coin_distance(pos_xy)
+        self._mark_visited(pos_xy)
 
         return self._get_obs()
 
@@ -340,6 +343,11 @@ class MiaoJiBallEnv:
         rels = [x[1] for x in nearby[: self.max_nearby_obs]]
         count = len(nearby)
         return rels, count
+
+    def _nearest_coin_distance(self, pos_xy: np.ndarray) -> float:
+        if not self.coin_positions:
+            return 0.0
+        return float(min(np.linalg.norm(cpos - pos_xy) for cpos in self.coin_positions.values()))
 
     def _nearest_coin_feature(self, pos_xy: np.ndarray) -> Tuple[float, float, float]:
         if not self.coin_positions:
@@ -420,11 +428,8 @@ class MiaoJiBallEnv:
         return len(collected)
 
     def _compute_reward_done(self, pos_xy: np.ndarray) -> Tuple[float, bool, Dict]:
-        hit = False
-        for oid in self.obstacle_ids + self.wall_ids:
-            if p.getContactPoints(self.ball_id, oid):
-                hit = True
-                break
+        wall_hit = any(p.getContactPoints(self.ball_id, wid) for wid in self.wall_ids)
+        obstacle_hit = any(p.getContactPoints(self.ball_id, oid) for oid in self.obstacle_ids)
 
         min_dist = self._min_distance_to_obstacles(pos_xy)
 
@@ -445,15 +450,24 @@ class MiaoJiBallEnv:
         reward += float(np.clip(improvement, -0.2, 0.2) * 0.5)
         self.last_min_dist = min_dist
 
+        coin_dist = self._nearest_coin_distance(pos_xy)
+        coin_approach = self.last_coin_dist - coin_dist
+        reward += float(np.clip(coin_approach, -0.25, 0.25) * 1.2)
+        self.last_coin_dist = coin_dist
+
         coins_collected = self._collect_coins(pos_xy)
         reward += coins_collected * self.coin_reward
-        if len(self.coin_ids) == 0:
-            reward += 1.0
-            done = True
-        else:
-            done = False
 
-        if hit:
+        done = False
+        all_coins_collected = len(self.coin_ids) == 0
+        if all_coins_collected:
+            reward += 2.0
+            done = True
+
+        if obstacle_hit:
+            reward -= 2.0
+
+        if wall_hit:
             reward -= 10.0
             done = True
 
@@ -461,19 +475,24 @@ class MiaoJiBallEnv:
             done = True
 
         info = {
-            "hit": hit,
+            "hit": bool(wall_hit or obstacle_hit),
+            "wall_hit": bool(wall_hit),
+            "obstacle_hit": bool(obstacle_hit),
             "min_dist": float(min_dist),
             "new_cell": is_new,
             "obstacles": len(self.obstacle_ids),
             "sensor_range": self.sensor_range,
             "coins_left": len(self.coin_ids),
             "coins_collected": coins_collected,
+            "all_coins_collected": all_coins_collected,
         }
         return float(reward), done, info
 
     def _update_internal_states(self, pos_xy: np.ndarray, reward: float, info: Dict) -> None:
-        if info["hit"]:
+        if info.get("wall_hit", False):
             self.emotion.pain = min(1.0, self.emotion.pain + 0.6)
+        elif info.get("obstacle_hit", False):
+            self.emotion.pain = min(1.0, self.emotion.pain + 0.2)
         else:
             self.emotion.pain = max(0.0, self.emotion.pain - 0.015)
 
