@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Tuple
 
 import gymnasium as gym
@@ -54,10 +55,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=100_000, help="训练步数")
     parser.add_argument("--max-steps", type=int, default=1500, help="每个episode最大步数")
+    default_model_path = str(
+        (Path(__file__).resolve().parent.parent / "models" / "ppo_miaoji_ball")
+    )
     parser.add_argument(
         "--model",
         type=str,
-        default="../models/ppo_miaoji_ball",
+        default=default_model_path,
         help="模型保存路径（不带.zip也可以）",
     )
     parser.add_argument(
