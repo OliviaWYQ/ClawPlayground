@@ -60,6 +60,15 @@ def main():
         default="../models/ppo_miaoji_ball",
         help="模型保存路径（不带.zip也可以）",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        choices=["cpu", "cuda", "auto"],
+        help="训练设备，Jetson 默认建议 cpu（更稳，不易OOM）",
+    )
+    parser.add_argument("--n-steps", type=int, default=512, help="PPO rollout 步数")
+    parser.add_argument("--batch-size", type=int, default=32, help="PPO batch size")
     args = parser.parse_args()
 
     vec_env = DummyVecEnv([make_env(args.max_steps)])
@@ -68,11 +77,11 @@ def main():
         "MlpPolicy",
         vec_env,
         verbose=1,
-        n_steps=1024,
-        batch_size=64,
+        n_steps=args.n_steps,
+        batch_size=args.batch_size,
         learning_rate=3e-4,
         gamma=0.99,
-        device="auto",
+        device=args.device,
     )
 
     model.learn(total_timesteps=args.steps)
